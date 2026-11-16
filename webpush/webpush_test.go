@@ -16,6 +16,7 @@ type transporteFalso struct {
 	mu     sync.Mutex
 	urls   []string
 	status map[string]int
+	corpo  map[string]string
 }
 
 func (f *transporteFalso) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -27,7 +28,7 @@ func (f *transporteFalso) RoundTrip(r *http.Request) (*http.Response, error) {
 	if st == 0 {
 		st = http.StatusCreated
 	}
-	return &http.Response{StatusCode: st, Body: io.NopCloser(bytes.NewReader(nil)), Header: http.Header{}}, nil
+	return &http.Response{StatusCode: st, Body: io.NopCloser(bytes.NewReader([]byte(f.corpo[r.URL.String()]))), Header: http.Header{}}, nil
 }
 
 func assinatura(t *testing.T, endpoint string) Assinatura {
@@ -110,5 +111,22 @@ func TestEnvia(t *testing.T) {
 	}
 	if _, err := c.Envia(context.Background(), []Assinatura{falha}, []byte(`{}`), Opcoes{}); err == nil {
 		t.Fatal("502 deveria pedir retentativa")
+	}
+}
+
+// 403 da Apple por token: não é assinatura morta. Apagar faria o push sumir em silêncio.
+func TestEnviaRecusaNaoApaga(t *testing.T) {
+	priv, _ := GeraChavePrivada()
+	c, _ := New(priv, "https://example.com")
+	apple := assinatura(t, "https://web.push.apple.com/QGx")
+	tr := &transporteFalso{status: map[string]int{apple.Endpoint: http.StatusForbidden},
+		corpo: map[string]string{apple.Endpoint: "{\"reason\":\n \"BadJwtToken\"}"}}
+	c.HTTP = &http.Client{Transport: tr}
+	r, err := c.Envia(context.Background(), []Assinatura{apple}, []byte(`{}`), Opcoes{})
+	if err != nil || len(r.Invalidos) != 0 || r.Enviados != 0 {
+		t.Fatalf("Envia: %+v %v", r, err)
+	}
+	if len(r.Rejeitados) != 1 || r.Rejeitados[0] != (Rejeicao{Host: "web.push.apple.com", Status: 403, Motivo: `{"reason": "BadJwtToken"}`}) {
+		t.Fatalf("rejeição: %+v", r.Rejeitados)
 	}
 }

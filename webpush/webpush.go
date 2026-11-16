@@ -134,8 +134,37 @@ type Resultado struct {
 	// Invalidos são os endpoints que o serviço diz que não existem mais (404/410) ou que não
 	// passam em EndpointValido: apague-os.
 	Invalidos []string
-	Enviados  int
-	Falhas    int
+	// Rejeitados são recusas que retentar não resolve (400, 403, 413), com o motivo que o serviço
+	// deu. NÃO apague: um 403 por token VAPID mal formado é culpa do servidor, e apagar faria todas
+	// as assinaturas sumirem em silêncio. Registre o motivo e deixe o navegador assinar de novo.
+	Rejeitados []Rejeicao
+	Enviados   int
+	Falhas     int
+}
+
+// Rejeicao é a resposta de um serviço de push que recusou o envio (sem o endpoint, que identifica o
+// aparelho: só o host).
+type Rejeicao struct {
+	Host   string
+	Status int
+	Motivo string
+}
+
+// motivo lê o começo da resposta ({"reason":"BadJwtToken"} da Apple, texto do FCM), sem quebras.
+func motivo(b []byte) string {
+	m := strings.Join(strings.Fields(string(b)), " ")
+	if len(m) > 200 {
+		m = m[:200]
+	}
+	return m
+}
+
+func host(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // Envia o payload (já serializado, até ~3 KB) a cada assinatura. Erro só se houve falha que vale
@@ -167,14 +196,15 @@ func (c *Cliente) Envia(ctx context.Context, as []Assinatura, payload []byte, o 
 			r.Falhas++
 			continue
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		corpo, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		switch {
 		case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
 			r.Invalidos = append(r.Invalidos, a.Endpoint)
-		case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden:
-			// Assinatura feita com outra chave VAPID ou corrompida: não adianta retentar.
-			r.Invalidos = append(r.Invalidos, a.Endpoint)
+		case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden ||
+			resp.StatusCode == http.StatusRequestEntityTooLarge:
+			// Outra chave VAPID, token recusado ou payload grande: retentar não resolve.
+			r.Rejeitados = append(r.Rejeitados, Rejeicao{Host: host(a.Endpoint), Status: resp.StatusCode, Motivo: motivo(corpo)})
 		case resp.StatusCode >= 300:
 			r.Falhas++
 		default:
